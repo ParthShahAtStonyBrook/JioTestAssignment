@@ -3,37 +3,73 @@ import base64
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import timedelta, datetime
+from decimal import Decimal
+import json
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super(CustomJSONEncoder, self).default(obj)
 
 app = Flask(__name__)
+app.json_encoder = CustomJSONEncoder
+
 # Configure CORS to accept requests from the frontend
 CORS(app, resources={
     r"/*": {
         "origins": ["http://localhost:5173"],
         "methods": ["GET", "POST"],
-        "allow_headers": ["Content-Type"]
+        "allow_headers": ["Content-Type", "Authorization"]
     }
 })
 
+# JWT Configuration
+app.config["JWT_SECRET_KEY"] = "your-secret-key"  # Change this in production!
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=1)
+jwt = JWTManager(app)
+
 # Basic configuration
 OLLAMA_URL = "http://localhost:11434"
+
+# Database configuration
+DB_CONFIG = {
+    'dbname': 'defect_detection',
+    'user': 'admin',
+    'password': 'admin123',
+    'host': 'localhost',
+    'port': '5432'
+}
+
+def get_db_connection():
+    """Create a database connection"""
+    return psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
 
 def encode_image_to_base64(image_path):
     """Convert image file to base64 string"""
     with open(image_path, "rb") as img_file:
         return base64.b64encode(img_file.read()).decode('utf-8')
 
-def call_ollama(prompt, image_path, model="qwen2.5vl:3b"):
+def call_ollama(prompt, image_path=None, model="qwen2.5vl:3b"):
     """Send a prompt to Ollama and get response"""
     url = f"{OLLAMA_URL}/api/generate"
-
-    image_base64 = encode_image_to_base64(image_path)
     
     data = {
         "model": model,
         "prompt": prompt,
-        "images": [image_base64],
-        "stream": False  # Set to True for streaming responses
+        "stream": False
     }
+    
+    if image_path:
+        image_base64 = encode_image_to_base64(image_path)
+        data["images"] = [image_base64]
     
     try:
         response = requests.post(url, json=data)
@@ -45,9 +81,280 @@ def call_ollama(prompt, image_path, model="qwen2.5vl:3b"):
     except requests.exceptions.RequestException as e:
         return f"Error calling Ollama: {e}"
 
+def handle_text_command(text, order_id=None):
+    """Handle text commands and return appropriate responses"""
+    text = text.lower()
+    
+    # Help command
+    if "help" in text:
+        return {
+            'type': 'text',
+            'content': """Here are the commands I understand:
+- Help: Show this help message
+- Show my orders: List your recent orders
+- Order status #[number]: Check status of a specific order
+- Report issue: Start the defect reporting process
+- What can you do?: Show bot capabilities"""
+        }
+    
+    # Show orders command
+    if "show my orders" in text or "list orders" in text:
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT id, date, status FROM orders ORDER BY date DESC LIMIT 5")
+            orders = cur.fetchall()
+            cur.close()
+            conn.close()
+            
+            orders_text = "Here are your recent orders:\n"
+            for order in orders:
+                orders_text += f"- Order #{order['id']} ({order['date']}): {order['status']}\n"
+            
+            return {
+                'type': 'text',
+                'content': orders_text
+            }
+        except Exception as e:
+            return {
+                'type': 'text',
+                'content': f"Sorry, I couldn't fetch your orders. Error: {str(e)}"
+            }
+    
+    # Order status command
+    if "order status" in text or "check order" in text:
+        try:
+            # Extract order number from text
+            import re
+            order_match = re.search(r'#?(\d+)', text)
+            if order_match:
+                order_id = order_match.group(1)
+                conn = get_db_connection()
+                cur = conn.cursor()
+                
+                # Get order details
+                cur.execute("""
+                    SELECT o.*, array_agg(i.name) as items 
+                    FROM orders o 
+                    LEFT JOIN order_items i ON o.id = i.order_id 
+                    WHERE o.id = %s 
+                    GROUP BY o.id
+                """, (order_id,))
+                order = cur.fetchone()
+                cur.close()
+                conn.close()
+                
+                if order:
+                    items_list = ', '.join(order['items'])
+                    return {
+                        'type': 'text',
+                        'content': f"Order #{order['id']}:\n- Date: {order['date']}\n- Status: {order['status']}\n- Items: {items_list}"
+                    }
+                else:
+                    return {
+                        'type': 'text',
+                        'content': f"Sorry, I couldn't find order #{order_id}"
+                    }
+            else:
+                return {
+                    'type': 'text',
+                    'content': "Please provide an order number (e.g., 'check order #1')"
+                }
+        except Exception as e:
+            return {
+                'type': 'text',
+                'content': f"Sorry, I couldn't check the order status. Error: {str(e)}"
+            }
+    
+    # Report issue command
+    if "report issue" in text or "report problem" in text:
+        return {
+            'type': 'command',
+            'action': 'start_report',
+            'content': "To report an issue, please select an order and item from the dropdowns above."
+        }
+    
+    # Bot capabilities command
+    if "what can you do" in text:
+        return {
+            'type': 'text',
+            'content': """I can help you with:
+1. Analyzing product defects using image analysis
+2. Checking your order status
+3. Viewing your order history
+4. Reporting issues with your orders
+5. Answering questions about the defect detection process
+
+Use the 'help' command to see available commands!"""
+        }
+    
+    # If no specific command is recognized, ask Ollama for a response
+    response = call_ollama(text)
+    return {
+        'type': 'text',
+        'content': response
+    }
+
 @app.route('/')
 def home():
     return jsonify({"status": "API is running"})
+
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    try:
+        data = request.json
+        username = data.get('username')
+        email = data.get('email')
+        password = data.get('password')
+
+        if not all([username, email, password]):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        # Hash the password
+        password_hash = generate_password_hash(password)
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Check if username or email already exists
+        cur.execute("SELECT id FROM users WHERE username = %s OR email = %s", (username, email))
+        if cur.fetchone():
+            return jsonify({'error': 'Username or email already exists'}), 409
+
+        # Insert new user
+        cur.execute(
+            "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s) RETURNING id",
+            (username, email, password_hash)
+        )
+        user_id = cur.fetchone()['id']
+        conn.commit()
+
+        # Create access token
+        access_token = create_access_token(identity=str(user_id))
+        
+        return jsonify({
+            'message': 'User registered successfully',
+            'access_token': access_token
+        }), 201
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if 'cur' in locals():
+            cur.close()
+        if 'conn' in locals():
+            conn.close()
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    try:
+        data = request.json
+        username = data.get('username')
+        password = data.get('password')
+
+        if not all([username, password]):
+            return jsonify({'error': 'Missing username or password'}), 400
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Get user by username
+        cur.execute("SELECT id, password_hash FROM users WHERE username = %s", (username,))
+        user = cur.fetchone()
+
+        if not user or not check_password_hash(user['password_hash'], password):
+            return jsonify({'error': 'Invalid username or password'}), 401
+
+        # Create access token
+        access_token = create_access_token(identity=str(user['id']))
+        
+        return jsonify({
+            'message': 'Login successful',
+            'access_token': access_token
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if 'cur' in locals():
+            cur.close()
+        if 'conn' in locals():
+            conn.close()
+
+@app.route('/api/auth/user', methods=['GET'])
+@jwt_required()
+def get_user():
+    try:
+        user_id = int(get_jwt_identity())
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT id, username, email, created_at FROM users WHERE id = %s", (user_id,))
+        user = cur.fetchone()
+
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+
+        return jsonify(user)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if 'cur' in locals():
+            cur.close()
+        if 'conn' in locals():
+            conn.close()
+
+# Protect all routes that require authentication
+@app.route('/orders', methods=['GET'])
+@jwt_required()
+def get_orders():
+    try:
+        user_id = int(get_jwt_identity())
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get all orders for the current user
+        cur.execute("""
+            SELECT id, date, status 
+            FROM orders 
+            WHERE user_id = %s
+            ORDER BY date DESC
+        """, (user_id,))
+        orders = cur.fetchall()
+        
+        # Get items for each order
+        for order in orders:
+            cur.execute("""
+                SELECT id, name, quantity, price 
+                FROM order_items 
+                WHERE order_id = %s
+            """, (order['id'],))
+            order['items'] = cur.fetchall()
+        
+        cur.close()
+        conn.close()
+        
+        return jsonify(orders)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/chat', methods=['POST'])
+def chat_endpoint():
+    try:
+        data = request.json
+        if not data or 'message' not in data:
+            return jsonify({'error': 'No message provided'}), 400
+        
+        message = data['message']
+        order_id = data.get('order_id')  # Optional order context
+        
+        response = handle_text_command(message, order_id)
+        return jsonify(response)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/analyze', methods=['POST'])
 def analyze_endpoint():
@@ -66,14 +373,13 @@ def analyze_endpoint():
             
         file_path = os.path.join(upload_dir, file.filename)
         file.save(file_path)
-                
+        
         # Create the prompt
         prompt = "Reply in exactly 2 lines. First line describing the image. Second line should say '1' if there is any defect or is product is broken else '0'"
 
         
         # Call Ollama for analysis
         response = call_ollama(prompt, file_path)
-        
 
         list_response = response.split('.')
         

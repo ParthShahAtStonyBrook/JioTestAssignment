@@ -1,0 +1,18 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+
+# PostgreSQL data
+postgres_data/
+
+# Uploads directory
+uploads/
+
+# IDE
+.vscode/
+.idea/ 

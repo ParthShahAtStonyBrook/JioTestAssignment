@@ -1,121 +1,105 @@
-import { Box, VStack, Heading, Text, Badge, SimpleGrid, HStack, Icon } from '@chakra-ui/react';
+import { Box, VStack, Heading, Text, Badge, SimpleGrid, HStack, Icon, Spinner, Button, Table, Thead, Tbody, Tr, Th, Td } from '@chakra-ui/react';
 import { FaBox, FaCalendarAlt, FaDollarSign } from 'react-icons/fa';
+import { useState, useEffect } from 'react';
+import axios from 'axios';
+import { useToast } from '@chakra-ui/react';
 
-export const dummyOrders = [
-  {
-    id: 1,
-    date: '2025-06-01',
-    items: [
-      { id: 101, name: 'Wireless Headphones', price: 99.99 },
-      { id: 102, name: 'Smart Watch', price: 199.99 }
-    ],
-    status: 'Delivered'
-  },
-  {
-    id: 2,
-    date: '2025-05-28',
-    items: [
-      { id: 201, name: 'Laptop Stand', price: 49.99 },
-      { id: 202, name: 'Keyboard', price: 79.99 }
-    ],
-    status: 'Delivered'
-  },
-  {
-    id: 3,
-    date: '2025-05-25',
-    items: [
-      { id: 301, name: 'Monitor', price: 299.99 }
-    ],
-    status: 'Delivered'
+const API_URL = 'http://localhost:5001';
+
+// Keep the dummy data for reference but don't use it
+
+const OrderList = ({ onLogout }) => {
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const toast = useToast();
+
+  useEffect(() => {
+    fetchOrders();
+  }, []);
+
+  const fetchOrders = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/orders`);
+      setOrders(response.data);
+    } catch (error) {
+      console.error('Error fetching orders:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load orders. Please try again later.',
+        status: 'error',
+        duration: 5000,
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <Box textAlign="center" py={10}>
+        <Spinner size="xl" />
+      </Box>
+    );
   }
-];
 
-const OrderList = () => {
   return (
-    <Box p={{ base: 4, md: 6, lg: 8 }}>
-      <Heading 
-        size="lg" 
-        mb={6} 
-        color="blue.700"
-        textAlign="center"
-      >
-        Your Orders
-      </Heading>
-      <VStack spacing={6} align="stretch" maxW="800px" mx="auto">
-        {dummyOrders.map((order) => (
-          <Box 
-            key={order.id}
-            p={{ base: 4, md: 6 }}
-            borderWidth={1}
-            borderRadius="xl"
-            shadow="md"
-            bg="white"
-            _hover={{ shadow: 'lg' }}
-            transition="all 0.2s"
+    <Box bg="white" borderRadius="lg" shadow="md" overflow="hidden">
+      <Box p={4} borderBottomWidth={1}>
+        <HStack justify="space-between">
+          <Heading size="md">Your Orders</Heading>
+          <Button
+            colorScheme="red"
+            variant="outline"
+            size="sm"
+            onClick={onLogout}
           >
-            <HStack 
-              justify="space-between" 
-              mb={4}
-              flexWrap={{ base: "wrap", md: "nowrap" }}
-              spacing={4}
-            >
-              <HStack spacing={4}>
-                <Icon as={FaBox} color="blue.500" boxSize={5} />
-                <Text fontWeight="bold" fontSize={{ base: "md", md: "lg" }}>
-                  Order #{order.id}
-                </Text>
-              </HStack>
-              <Badge 
-                colorScheme="green" 
-                p={2} 
-                borderRadius="md"
-                fontSize={{ base: "xs", md: "sm" }}
-              >
-                {order.status}
-              </Badge>
-            </HStack>
-            
-            <HStack 
-              spacing={{ base: 4, md: 6 }} 
-              mb={4} 
-              color="gray.600"
-              flexWrap={{ base: "wrap", md: "nowrap" }}
-            >
-              <HStack>
-                <Icon as={FaCalendarAlt} />
-                <Text fontSize={{ base: "sm", md: "md" }}>{order.date}</Text>
-              </HStack>
-              <HStack>
-                <Icon as={FaDollarSign} />
-                <Text fontSize={{ base: "sm", md: "md" }}>
-                  Total: ${order.items.reduce((sum, item) => sum + item.price, 0).toFixed(2)}
-                </Text>
-              </HStack>
-            </HStack>
-            
-            <SimpleGrid 
-              columns={{ base: 1, md: 2 }} 
-              spacing={4} 
-              mt={4}
-            >
-              {order.items.map((item) => (
-                <Box 
-                  key={item.id}
-                  p={4}
-                  borderWidth={1}
-                  borderRadius="lg"
-                  bg="gray.50"
-                >
-                  <VStack align="start" spacing={1}>
-                    <Text fontWeight="medium">{item.name}</Text>
-                    <Text fontSize="sm" color="gray.600">${item.price}</Text>
-                  </VStack>
-                </Box>
-              ))}
-            </SimpleGrid>
-          </Box>
-        ))}
-      </VStack>
+            Logout
+          </Button>
+        </HStack>
+      </Box>
+
+      {orders.length === 0 ? (
+        <Box p={4} textAlign="center">
+          <Text color="gray.500">No orders found</Text>
+        </Box>
+      ) : (
+        <Table variant="simple">
+          <Thead>
+            <Tr>
+              <Th>Order ID</Th>
+              <Th>Date</Th>
+              <Th>Status</Th>
+              <Th>Items</Th>
+            </Tr>
+          </Thead>
+          <Tbody>
+            {orders.map((order) => (
+              <Tr key={order.id}>
+                <Td>#{order.id}</Td>
+                <Td>{new Date(order.date).toLocaleDateString()}</Td>
+                <Td>
+                  <Badge
+                    colorScheme={
+                      order.status === 'Delivered'
+                        ? 'green'
+                        : order.status === 'Pending'
+                        ? 'yellow'
+                        : 'blue'
+                    }
+                  >
+                    {order.status}
+                  </Badge>
+                </Td>
+                <Td>
+                  <Text noOfLines={2}>
+                    {order.items.map((item) => item.name).join(', ')}
+                  </Text>
+                </Td>
+              </Tr>
+            ))}
+          </Tbody>
+        </Table>
+      )}
     </Box>
   );
 };
