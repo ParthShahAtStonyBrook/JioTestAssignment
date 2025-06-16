@@ -10,6 +10,17 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import timedelta, datetime
 from decimal import Decimal
 import json
+import asyncio,nest_asyncio
+from llama_index.tools.mcp import BasicMCPClient, McpToolSpec
+from llama_index.llms.ollama import Ollama
+from llama_index.core import Settings
+from llama_index.tools.mcp import McpToolSpec
+from llama_index.core.agent.workflow import FunctionAgent
+from llama_index.core.agent.workflow import (
+    FunctionAgent, 
+    ToolCallResult, 
+    ToolCall)
+from llama_index.core.workflow import Context
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -41,9 +52,9 @@ OLLAMA_URL = "http://localhost:11434"
 
 # Database configuration
 DB_CONFIG = {
-    'dbname': 'defect_detection',
+    'dbname': 'app',
     'user': 'admin',
-    'password': 'admin123',
+    'password': 'root',
     'host': 'localhost',
     'port': '5432'
 }
@@ -81,115 +92,55 @@ def call_ollama(prompt, image_path=None, model="qwen2.5vl:3b"):
     except requests.exceptions.RequestException as e:
         return f"Error calling Ollama: {e}"
 
+nest_asyncio.apply()
+
+# Initialize LLM and MCP client globally (these are safe to reuse)
+llm = Ollama(model="qwen2.5:3b", request_timeout=120.0)
+Settings.llm = llm
+
+mcp_client = BasicMCPClient("http://127.0.0.1:8000/sse")
+mcp_tools = McpToolSpec(client=mcp_client)
+
+SYSTEM_PROMPT = """\
+You are an AI assistant for a defect detection system in an ecommerce website. 
+"""
+
+async def get_agent(tools: McpToolSpec):
+    tools = await tools.to_tool_list_async()
+    agent = FunctionAgent(
+        name="Agent",
+        description="An agent that can work with Our Database software.",
+        tools=tools,
+        llm=llm,
+        system_prompt=SYSTEM_PROMPT,
+    )
+    return agent
+
+async def handle_user_message(
+    message_content: str,
+    agent: FunctionAgent,
+    agent_context: Context,
+    verbose: bool = False,
+):
+    handler = agent.run(message_content, ctx=agent_context)
+    async for event in handler.stream_events():
+        if verbose and type(event) == ToolCall:
+            print(f"Calling tool {event.tool_name} with kwargs {event.tool_kwargs}")
+        elif verbose and type(event) == ToolCallResult:
+            print(f"Tool {event.tool_name} returned {event.tool_output}")
+
+    response = await handler
+    return str(response)
+
 def handle_text_command(text, order_id=None):
     """Handle text commands and return appropriate responses"""
-    text = text.lower()
+    async def process_request():
+        # Create fresh agent and context for each request
+        agent = await get_agent(mcp_tools)
+        agent_context = Context(agent)
+        return await handle_user_message(text, agent, agent_context, verbose=True)
     
-    # Help command
-    if "help" in text:
-        return {
-            'type': 'text',
-            'content': """Here are the commands I understand:
-- Help: Show this help message
-- Show my orders: List your recent orders
-- Order status #[number]: Check status of a specific order
-- Report issue: Start the defect reporting process
-- What can you do?: Show bot capabilities"""
-        }
-    
-    # Show orders command
-    if "show my orders" in text or "list orders" in text:
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT id, date, status FROM orders ORDER BY date DESC LIMIT 5")
-            orders = cur.fetchall()
-            cur.close()
-            conn.close()
-            
-            orders_text = "Here are your recent orders:\n"
-            for order in orders:
-                orders_text += f"- Order #{order['id']} ({order['date']}): {order['status']}\n"
-            
-            return {
-                'type': 'text',
-                'content': orders_text
-            }
-        except Exception as e:
-            return {
-                'type': 'text',
-                'content': f"Sorry, I couldn't fetch your orders. Error: {str(e)}"
-            }
-    
-    # Order status command
-    if "order status" in text or "check order" in text:
-        try:
-            # Extract order number from text
-            import re
-            order_match = re.search(r'#?(\d+)', text)
-            if order_match:
-                order_id = order_match.group(1)
-                conn = get_db_connection()
-                cur = conn.cursor()
-                
-                # Get order details
-                cur.execute("""
-                    SELECT o.*, array_agg(i.name) as items 
-                    FROM orders o 
-                    LEFT JOIN order_items i ON o.id = i.order_id 
-                    WHERE o.id = %s 
-                    GROUP BY o.id
-                """, (order_id,))
-                order = cur.fetchone()
-                cur.close()
-                conn.close()
-                
-                if order:
-                    items_list = ', '.join(order['items'])
-                    return {
-                        'type': 'text',
-                        'content': f"Order #{order['id']}:\n- Date: {order['date']}\n- Status: {order['status']}\n- Items: {items_list}"
-                    }
-                else:
-                    return {
-                        'type': 'text',
-                        'content': f"Sorry, I couldn't find order #{order_id}"
-                    }
-            else:
-                return {
-                    'type': 'text',
-                    'content': "Please provide an order number (e.g., 'check order #1')"
-                }
-        except Exception as e:
-            return {
-                'type': 'text',
-                'content': f"Sorry, I couldn't check the order status. Error: {str(e)}"
-            }
-    
-    # Report issue command
-    if "report issue" in text or "report problem" in text:
-        return {
-            'type': 'command',
-            'action': 'start_report',
-            'content': "To report an issue, please select an order and item from the dropdowns above."
-        }
-    
-    # Bot capabilities command
-    if "what can you do" in text:
-        return {
-            'type': 'text',
-            'content': """I can help you with:
-1. Analyzing product defects using image analysis
-2. Checking your order status
-3. Viewing your order history
-4. Reporting issues with your orders
-5. Answering questions about the defect detection process
-
-Use the 'help' command to see available commands!"""
-        }
-    
-    # If no specific command is recognized, ask Ollama for a response
-    response = call_ollama(text)
+    response = asyncio.run(process_request())
     return {
         'type': 'text',
         'content': response
@@ -365,7 +316,7 @@ def analyze_endpoint():
         file = request.files['image']
         if not file:
             return jsonify({'error': 'Empty file provided'}), 400
-            
+        
         # Save the uploaded file temporarily
         upload_dir = 'uploads'
         if not os.path.exists(upload_dir):
