@@ -4,6 +4,9 @@ from bs4 import BeautifulSoup
 import requests
 from sqlalchemy import create_engine
 import regex as re
+from fastapi import FastAPI
+
+app = FastAPI()
 
 def fetch_url():
     url = 'https://www.rbi.org.in/scripts/neft.aspx'
@@ -25,26 +28,15 @@ def fetch_url():
     return excel_url
 
 
-DB_CONFIG = {
-    'dbname': 'test_db',
-    'user': 'admin',
-    'password': 'root',
-    'host': 'localhost',
-    'port': '5432'
-}
+@app.get("/fetch-excel-data")
+def fetch_excel_data():
+    excel_url = fetch_url()
+    print("Fetched current url : ", excel_url)
+    response = requests.get(excel_url)
+    response.raise_for_status()
 
-engine_url = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
-engine = create_engine(engine_url)
+    excel_data = pd.read_excel(BytesIO(response.content), sheet_name=None) 
 
-excel_url = fetch_url()
-print("Fetched current url : ", excel_url)
-response = requests.get(excel_url)
-response.raise_for_status()
+    data = {sheet_name: df.fillna('').to_dict(orient='records') for sheet_name, df in excel_data.items()}
 
-excel_data = pd.read_excel(BytesIO(response.content), sheet_name=None) 
-
-for sheet_name, df in excel_data.items():
-    print(f"Inserting sheet '{sheet_name}' into table '{sheet_name}' ({len(df)} rows)")
-    df.to_sql(sheet_name, engine, if_exists='replace', index=False)
-
-print("All sheets inserted successfully.")
+    return {"sheets": data}
