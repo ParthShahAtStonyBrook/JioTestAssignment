@@ -8,12 +8,12 @@ from psycopg2.extras import RealDictCursor
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import timedelta, datetime
+from llama_index.core import Settings
 from decimal import Decimal
 import json
 import asyncio,nest_asyncio
 from llama_index.tools.mcp import BasicMCPClient, McpToolSpec
 from llama_index.llms.ollama import Ollama
-from llama_index.core import Settings
 from llama_index.tools.mcp import McpToolSpec
 from llama_index.core.agent.workflow import FunctionAgent
 from llama_index.core.agent.workflow import (
@@ -101,9 +101,42 @@ Settings.llm = llm
 mcp_client = BasicMCPClient("http://127.0.0.1:8000/sse")
 mcp_tools = McpToolSpec(client=mcp_client)
 
-SYSTEM_PROMPT = """\
-You are an AI assistant for a defect detection system in an ecommerce website. 
-"""
+SYSTEM_PROMPT = """You are a helpful e-commerce assistant that helps users track their orders and provides information about their purchases. You have access to the user's order history through the search_orders_tool.
+
+CRITICAL SECURITY RULES:
+1. NEVER access or reveal order information for any user other than the current user.
+2. ALWAYS require a user_id parameter when searching orders.
+3. If no user_id is provided, respond with "I cannot access order information without a valid user ID."
+4. NEVER make assumptions about user IDs or try to guess them.
+5. NEVER combine or compare data across different users.
+6. If asked about other users' orders, respond with "I can only access your own order information."
+
+ORDER INFORMATION RULES:
+1. When showing order details, ALWAYS include:
+   - Complete item details (name, quantity, price)
+   - Order status (pending/completed)
+   - Order date
+2. Format prices with 2 decimal places (e.g., $99.99)
+3. For pending orders, clearly indicate the status
+4. For completed orders, show the completion date
+
+SEARCH CAPABILITIES:
+1. You can search orders by:
+   - Order status (pending/completed)
+   - Item names
+   - Dates
+   - Any combination of the above
+2. Always use the search_orders_tool with the current user's ID
+3. Never search without a user ID
+
+USER INTERACTION:
+1. Be clear and concise in responses
+2. If asked about other users' data, firmly decline and explain you can only access the current user's data
+3. If no user ID is provided, ask for it before proceeding
+4. Format responses in a clear, readable way
+5. Always verify the user ID before showing any order information
+
+Remember: Data privacy is critical. Never access or reveal information about other users' orders."""
 
 async def get_agent(tools: McpToolSpec):
     tools = await tools.to_tool_list_async()
@@ -120,9 +153,11 @@ async def handle_user_message(
     message_content: str,
     agent: FunctionAgent,
     agent_context: Context,
+    user_id : int,
     verbose: bool = False,
 ):
-    handler = agent.run(message_content, ctx=agent_context)
+    content_with_id = f"[USER_ID: {user_id}] {message_content}"
+    handler = agent.run(content_with_id, ctx=agent_context)
     async for event in handler.stream_events():
         if verbose and type(event) == ToolCall:
             print(f"Calling tool {event.tool_name} with kwargs {event.tool_kwargs}")
@@ -132,13 +167,15 @@ async def handle_user_message(
     response = await handler
     return str(response)
 
-def handle_text_command(text, order_id=None):
+def handle_text_command(text, order_id=None, user_id=None):
     """Handle text commands and return appropriate responses"""
     async def process_request():
         # Create fresh agent and context for each request
         agent = await get_agent(mcp_tools)
         agent_context = Context(agent)
-        return await handle_user_message(text, agent, agent_context, verbose=True)
+
+
+        return await handle_user_message(text, agent, agent_context, verbose=True,user_id= user_id)
     
     response = asyncio.run(process_request())
     return {
@@ -292,6 +329,7 @@ def get_orders():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/chat', methods=['POST'])
+@jwt_required()
 def chat_endpoint():
     try:
         data = request.json
@@ -300,8 +338,8 @@ def chat_endpoint():
         
         message = data['message']
         order_id = data.get('order_id')  # Optional order context
-        
-        response = handle_text_command(message, order_id)
+        user_id = int(get_jwt_identity())
+        response = handle_text_command(message, order_id, user_id)
         return jsonify(response)
         
     except Exception as e:
