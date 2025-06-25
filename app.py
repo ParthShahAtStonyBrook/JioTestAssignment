@@ -21,6 +21,7 @@ from llama_index.core.agent.workflow import (
     ToolCallResult, 
     ToolCall)
 from llama_index.core.workflow import Context
+import re
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -101,15 +102,14 @@ Settings.llm = llm
 mcp_client = BasicMCPClient("http://127.0.0.1:8000/sse")
 mcp_tools = McpToolSpec(client=mcp_client)
 
-SYSTEM_PROMPT = """You are a helpful e-commerce assistant that helps users track their orders and provides information about their purchases. You have access to the user's order history through the search_orders_tool.
+SYSTEM_PROMPT = """You are a helpful e-commerce assistant that helps users track their orders and provides information about their purchases and solve user questions based on mutual fund. You have access to the user's order history through the search_orders_tool.
 
 CRITICAL SECURITY RULES:
 1. NEVER access or reveal order information for any user other than the current user.
-2. ALWAYS require a user_id parameter when searching orders.
-3. If no user_id is provided, respond with "I cannot access order information without a valid user ID."
-4. NEVER make assumptions about user IDs or try to guess them.
-5. NEVER combine or compare data across different users.
-6. If asked about other users' orders, respond with "I can only access your own order information."
+2. NEVER make assumptions about user IDs or try to guess them.
+3. NEVER combine or compare data across different users.
+4. If asked about other user id's data, respond with "I can only access your own order information."
+5. Do not change or override user_id. Always trust the user_id passed to you.
 
 ORDER INFORMATION RULES:
 1. When showing order details, ALWAYS include:
@@ -119,6 +119,7 @@ ORDER INFORMATION RULES:
 2. Format prices with 2 decimal places (e.g., $99.99)
 3. For pending orders, clearly indicate the status
 4. For completed orders, show the completion date
+5. Do not ask the user for their user_id
 
 SEARCH CAPABILITIES:
 1. You can search orders by:
@@ -127,7 +128,9 @@ SEARCH CAPABILITIES:
    - Dates
    - Any combination of the above
 2. Always use the search_orders_tool with the current user's ID
-3. Never search without a user ID
+3. Never search order history without a user ID
+4. When answering questions about Mutual funds use the search_faq_tool and provide a short reply.
+
 
 USER INTERACTION:
 1. Be clear and concise in responses
@@ -135,6 +138,9 @@ USER INTERACTION:
 3. If no user ID is provided, ask for it before proceeding
 4. Format responses in a clear, readable way
 5. Always verify the user ID before showing any order information
+6. Do not reveal your sources for the response that you provide
+7. Do not give out similarity scores in response
+8. Do not say that where the information you are using is coming from
 
 Remember: Data privacy is critical. Never access or reveal information about other users' orders."""
 
@@ -149,25 +155,40 @@ async def get_agent(tools: McpToolSpec):
     )
     return agent
 
+def clean_agent_output(output: str) -> str:
+    # Remove similarity scores
+    output = re.sub(r'\(Similarity Score:.*?\)', '', output)
+    # Remove source markers like "FAQ Document:"
+    output = re.sub(r'- \*\*FAQ Document\*\*:\s*', '', output)
+    # Remove JSON fields like "source": "...", or "similarity_score": ...
+    output = re.sub(r'"(source|similarity_score)"\s*:\s*".*?",?', '', output)
+    # Clean up leftover commas or whitespace
+    output = re.sub(r',\s*}', '}', output)
+    return output.strip()
+
 async def handle_user_message(
     message_content: str,
     agent: FunctionAgent,
     agent_context: Context,
-    user_id : int,
+    user_id: int,
     verbose: bool = False,
 ):
     content_with_id = f"[USER_ID: {user_id}] {message_content}"
     handler = agent.run(content_with_id, ctx=agent_context)
+
     async for event in handler.stream_events():
-        if verbose and type(event) == ToolCall:
+        if verbose and isinstance(event, ToolCall):
+            event.tool_kwargs['user_id'] = user_id
+            print(event.tool_kwargs['user_id'])
             print(f"Calling tool {event.tool_name} with kwargs {event.tool_kwargs}")
-        elif verbose and type(event) == ToolCallResult:
+        elif verbose and isinstance(event, ToolCallResult):
             print(f"Tool {event.tool_name} returned {event.tool_output}")
 
     response = await handler
-    return str(response)
+    cleaned = clean_agent_output(str(response))
+    return cleaned
 
-def handle_text_command(text, order_id=None, user_id=None):
+def handle_text_command(text, user_id=None):
     """Handle text commands and return appropriate responses"""
     async def process_request():
         # Create fresh agent and context for each request
@@ -182,6 +203,25 @@ def handle_text_command(text, order_id=None, user_id=None):
         'type': 'text',
         'content': response
     }
+
+
+@app.route('/chat', methods=['POST'])
+@jwt_required()
+def chat_endpoint():
+    try:
+        data = request.json
+        if not data or 'message' not in data:
+            return jsonify({'error': 'No message provided'}), 400
+        
+        message = data['message']
+        user_id = int(get_jwt_identity())
+        print("User id is ", user_id)
+        response = handle_text_command(message, user_id)
+        return jsonify(response)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
 
 @app.route('/')
 def home():
@@ -328,22 +368,6 @@ def get_orders():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/chat', methods=['POST'])
-@jwt_required()
-def chat_endpoint():
-    try:
-        data = request.json
-        if not data or 'message' not in data:
-            return jsonify({'error': 'No message provided'}), 400
-        
-        message = data['message']
-        order_id = data.get('order_id')  # Optional order context
-        user_id = int(get_jwt_identity())
-        response = handle_text_command(message, order_id, user_id)
-        return jsonify(response)
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/analyze', methods=['POST'])
 def analyze_endpoint():

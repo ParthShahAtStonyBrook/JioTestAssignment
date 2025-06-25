@@ -92,7 +92,7 @@ const OrderList = ({ onLogout }) => {
                 </Td>
                 <Td>
                   <Text noOfLines={2}>
-                    {order.items.map((item) => item.name).join(', ')}
+                    {order.items.map((item) => `${item.name} ($${item.price?.toFixed(2) ?? 'N/A'})`).join(', ')}
                   </Text>
                 </Td>
               </Tr>

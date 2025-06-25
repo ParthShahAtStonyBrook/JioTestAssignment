@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 venv/
+testing.py
 
 # PostgreSQL data
 postgres_data/
@@ -16,3 +17,10 @@ uploads/
 # IDE
 .vscode/
 .idea/ 
+
+#Local models
+local_models/
+
+#Qdrant
+qdrant_storage/
+FAQ_Data/

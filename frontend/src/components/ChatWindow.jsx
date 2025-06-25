@@ -316,7 +316,8 @@ const ChatWindow = ({ onClose }) => {
               >
                 {selectedOrder.items.map(item => (
                   <option key={item.id} value={item.id}>
-                    {item.name}
+                    {item.name} ($
+                    {item.price !== undefined && item.price !== null ? item.price.toFixed(2) : 'N/A'})
                   </option>
                 ))}
               </Select>

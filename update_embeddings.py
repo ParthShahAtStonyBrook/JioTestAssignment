@@ -5,6 +5,7 @@ from qdrant_client.models import PointStruct
 from qdrant_client.models import VectorParams, Distance
 import logging
 import sys
+import time
 from datetime import datetime
 
 # Configure logging
@@ -80,12 +81,11 @@ def main():
     try:
         # Initialize models and clients
         logger.info("Initializing models and clients")
+        start = time.time()
         model = SentenceTransformer("all-MiniLM-L6-v2")
+        print(f"Step model took {time.time() - start:.2f} seconds")
         vector_size = model.get_sentence_embedding_dimension()
         qdrant = QdrantClient("localhost", port=6333)
-
-        # Ensure collection exists
-        get_or_create_collection(qdrant, "user_orders", vector_size)
 
         # Connect to PostgreSQL
         conn = get_db_connection()
@@ -94,8 +94,10 @@ def main():
         # Fetch all orders
         logger.info("Fetching orders from database")
         rows = fetch_all_orders(cursor)
-        
-        points = []
+
+        # Group points by user_id
+        user_points = {}
+
         for row in rows:
             order_id, user_id, date, status, items = row
             # Format items with prices
@@ -112,39 +114,46 @@ def main():
             vector = model.encode(text)
 
             # Create Qdrant point with complete item details
-            points.append(
-                PointStruct(
-                    id=int(order_id),
-                    vector=vector.tolist(),
-                    payload={
-                        "user_id": user_id,
-                        "order_id": order_id,
-                        "summary": text,
-                        "status": status,
-                        "date": date.isoformat(),
-                        "items": [
-                            {
-                                "name": item["name"],
-                                "quantity": item["quantity"],
-                                "price": float(item["price"])  # Ensure price is float
-                            }
-                            for item in items
-                        ]
-                    }
+            point = PointStruct(
+                id=int(order_id),
+                vector=vector.tolist(),
+                payload={
+                    "user_id": user_id,
+                    "order_id": order_id,
+                    "summary": text,
+                    "status": status,
+                    "date": date.isoformat(),
+                    "items": [
+                        {
+                            "name": item["name"],
+                            "quantity": item["quantity"],
+                            "price": float(item["price"])  # Ensure price is float
+                        }
+                        for item in items
+                    ]
+                }
+            )
+
+            if user_id not in user_points:
+                user_points[user_id] = []
+            user_points[user_id].append(point)
+
+        # For each user, create collection and upload points
+        for user_id, points in user_points.items():
+            collection_name = f"user_orders_{user_id}"
+            get_or_create_collection(qdrant, collection_name, vector_size)
+            
+            # Upload in batches
+            batch_size = 100
+            for i in range(0, len(points), batch_size):
+                batch = points[i:i + batch_size]
+                logger.info(f"Uploading batch {i//batch_size + 1} for user {user_id} to collection {collection_name}")
+                qdrant.upsert(
+                    collection_name=collection_name,
+                    points=batch
                 )
-            )
 
-        # Upload to Qdrant in batches
-        batch_size = 100
-        for i in range(0, len(points), batch_size):
-            batch = points[i:i + batch_size]
-            logger.info(f"Uploading batch {i//batch_size + 1} of {(len(points) + batch_size - 1)//batch_size}")
-            qdrant.upsert(
-                collection_name="user_orders",
-                points=batch
-            )
-
-        logger.info(f"Successfully indexed {len(points)} orders into Qdrant")
+        logger.info(f"Successfully indexed orders for {len(user_points)} users into Qdrant")
 
     except Exception as e:
         logger.error(f"Error in main process: {str(e)}")
